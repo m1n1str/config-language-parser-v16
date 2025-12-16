@@ -1,6 +1,7 @@
+#!/usr/bin/env python3
 """
-Парсер (вариант 16)
-Полная версия с поддержкой констант
+Парсер для учебного конфигурационного языка (вариант 16)
+Полная версия с поддержкой констант и обработкой ошибок
 """
 
 import json
@@ -9,408 +10,338 @@ import re
 
 class ConfigParser:
     def __init__(self):
-        self.text = ""
-        self.pos = 0
-        self.line = 1
-        self.column = 1
-        self.constants = {}  # Хранилище констант
-
-    def parse(self, text):
-        """Основной метод парсинга с поддержкой констант"""
-        self.text = text
-        self.pos = 0
-        self.line = 1
-        self.column = 1
         self.constants = {}
 
-        # Шаг 1: Собираем все константы
-        self._collect_constants()
+    def parse(self, text):
+        """Основной метод парсинга"""
+        # 1. Собираем константы
+        self._extract_constants(text)
 
-        # Шаг 2: Парсим основную конфигурацию
-        self.pos = 0
-        self.line = 1
-        self.column = 1
+        # 2. Удаляем комментарии
+        text = self._remove_comments_safe(text)
 
-        self._skip_whitespace_and_comments()
+        # 3. Удаляем define из текста
+        text = re.sub(r'\(define[^)]+\)', '', text)
 
-        if self._peek() != '{':
-            raise SyntaxError(f"Ожидалось '{{' в начале конфигурации (строка {self.line}, столбец {self.column})")
-
-        result = self._parse_dict()
-
-        self._skip_whitespace_and_comments()
-        if self.pos < len(self.text):
-            raise SyntaxError(f"Лишние символы в конце файла: '{self.text[self.pos:]}'")
+        # 4. Парсим основной словарь
+        result = self._parse_main_dict(text)
 
         return result
 
-    def _collect_constants(self):
-        """Сбор всех определений констант (define)"""
-        original_pos = self.pos
-        original_line = self.line
-        original_column = self.column
+    def _remove_comments_safe(self, text):
+        """Удаляем комментарии, но не внутри строк"""
+        result = []
+        i = 0
+        in_string = False
 
-        while self.pos < len(self.text):
-            self._skip_whitespace_and_comments()
+        while i < len(text):
+            # Проверяем начало строки @"
+            if text[i:i + 2] == '@"' and not in_string:
+                in_string = True
+                result.append(text[i])
+                i += 1
+                continue
 
-            if self._peek() == '(':
-                self.pos += 1
-                self.column += 1
+            # Конец строки
+            if text[i] == '"' and in_string:
+                in_string = False
 
-                self._skip_whitespace_and_comments()
+            # Комментарии только вне строк
+            if not in_string:
+                # Однострочный комментарий C
+                if text[i] == 'C' and (i + 1 < len(text)) and text[i + 1] in ' \t\n':
+                    # Пропускаем до конца строки
+                    while i < len(text) and text[i] != '\n':
+                        i += 1
+                    continue
 
-                # Проверяем define
-                if self._peek(6) == 'define':
-                    self.pos += 6
-                    self.column += 6
+                # Многострочный комментарий --[[
+                if text[i:i + 4] == '--[[':
+                    # Пропускаем до ]]
+                    i += 4
+                    while i < len(text) and text[i:i + 2] != ']]':
+                        i += 1
+                    i += 2  # Пропускаем ]]
+                    continue
 
-                    self._skip_whitespace_and_comments()
+            result.append(text[i])
+            i += 1
 
-                    # Имя константы
-                    const_name = self._parse_identifier_for_define()
+        return ''.join(result)
 
-                    self._skip_whitespace_and_comments()
+    def _extract_constants(self, text):
+        """Извлекаем константы (define ...)"""
+        self.constants = {}
 
-                    # Значение константы
-                    const_value = self._parse_constant_value()
+        i = 0
+        while i < len(text):
+            if text[i:i + 7] == '(define':
+                i += 7
 
-                    # Сохраняем константу
-                    self.constants[const_name] = const_value
+                # Пропускаем пробелы
+                while i < len(text) and text[i] in ' \t\n\r':
+                    i += 1
 
-                    # Закрывающая скобка
-                    self._skip_whitespace_and_comments()
-                    if self._peek() != ')':
-                        raise SyntaxError(
-                            f"Ожидалось ')' после определения константы (строка {self.line}, столбец {self.column})")
-                    self.pos += 1
-                    self.column += 1
+                # Имя константы
+                name_start = i
+                while i < len(text) and (text[i].isalpha() or text[i] == '_' or text[i].isdigit()):
+                    i += 1
+                const_name = text[name_start:i]
+
+                if not const_name or not re.match(r'^[_a-z][_a-z0-9]*$', const_name):
+                    raise SyntaxError(f"Неправильное имя константы: {const_name}")
+
+                # Пропускаем пробелы
+                while i < len(text) and text[i] in ' \t\n\r':
+                    i += 1
+
+                # Значение константы
+                value_start = i
+
+                # Строка
+                if text[i:i + 2] == '@"':
+                    i += 2
+                    while i < len(text) and text[i] != '"':
+                        i += 1
+                    const_value = text[value_start + 2:i]
+                    i += 1  # Пропускаем "
+
+                # Число
                 else:
-                    # Не define, пропускаем до конца скобки
-                    while self.pos < len(self.text) and self.text[self.pos] != ')':
-                        self.pos += 1
-                        self.column += 1
-                    if self.pos < len(self.text):
-                        self.pos += 1
-                        self.column += 1
+                    start_num = i
+                    if text[i] in '+-':
+                        i += 1
+
+                    while i < len(text) and (text[i].isdigit() or text[i] == '.'):
+                        i += 1
+
+                    num_str = text[start_num:i]
+                    if not re.match(r'^[+-]?\d+\.\d+$', num_str):
+                        raise SyntaxError(f"Некорректное число в define: {num_str}")
+
+                    const_value = float(num_str)
+
+                # Сохраняем константу
+                self.constants[const_name] = const_value
+
+                # Ищем закрывающую скобку
+                while i < len(text) and text[i] != ')':
+                    i += 1
+                i += 1
             else:
-                self.pos += 1
-                self.column += 1
+                i += 1
 
-        # Возвращаем позицию на начало
-        self.pos = original_pos
-        self.line = original_line
-        self.column = original_column
+    def _parse_main_dict(self, text):
+        """Парсим основной словарь"""
+        # Ищем первый словарь { ... }
+        start = text.find('{')
+        if start == -1:
+            return {}
 
-    def _parse_identifier_for_define(self):
-        """Парсинг идентификатора для define (отдельный метод)"""
-        start_pos = self.pos
+        # Находим парную закрывающую скобку
+        depth = 0
+        end = start
 
-        if self.pos < len(self.text) and (self.text[self.pos] == '_' or self.text[self.pos].islower()):
-            self.pos += 1
-            self.column += 1
+        for i in range(start, len(text)):
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
 
-            while self.pos < len(self.text) and (
-                    self.text[self.pos] == '_' or self.text[self.pos].islower() or self.text[self.pos].isdigit()):
-                self.pos += 1
-                self.column += 1
+        if depth != 0:
+            raise SyntaxError("Непарные фигурные скобки")
 
-            return self.text[start_pos:self.pos]
-        else:
-            raise SyntaxError(f"Ожидался идентификатор для define (строка {self.line}, столбец {self.column})")
+        dict_text = text[start:end]
+        return self._parse_dict(dict_text)
 
-    def _parse_constant_value(self):
-        """Парсинг значения для define"""
-        if self._peek() == '@':
-            return self._parse_string_in_define()
-        elif self._peek() in '+-' or self._peek().isdigit():
-            return self._parse_number_in_define()
-        else:
-            raise SyntaxError(f"Некорректное значение константы (строка {self.line}, столбец {self.column})")
+    def _parse_dict(self, text):
+        """Парсим словарь"""
+        if not text or text[0] != '{' or text[-1] != '}':
+            return {}
 
-    def _parse_string_in_define(self):
-        """Парсинг строки внутри define"""
-        if not (self.pos + 2 <= len(self.text) and self.text[self.pos:self.pos + 2] == '@"'):
-            raise SyntaxError(f"Ожидалось '@\"' (строка {self.line}, столбец {self.column})")
-
-        self.pos += 2
-        self.column += 2
-        start_pos = self.pos
-
-        while self.pos < len(self.text) and self.text[self.pos] != '"':
-            if self.text[self.pos] == '\n':
-                self.line += 1
-                self.column = 1
-            else:
-                self.column += 1
-            self.pos += 1
-
-        if self.pos >= len(self.text):
-            raise SyntaxError(f"Незакрытая строка в определении константы (строка {self.line})")
-
-        value = self.text[start_pos:self.pos]
-        self.pos += 1  # Закрывающая кавычка
-        self.column += 1
-
-        return value
-
-    def _parse_number_in_define(self):
-        """Парсинг числа внутри define"""
-        pattern = r'[+-]?\d+\.\d+'
-        match = re.match(pattern, self.text[self.pos:])
-
-        if not match:
-            raise SyntaxError(
-                f"Ожидалось число формата [+-]?\d+\.\d+ в define (строка {self.line}, столбец {self.column})")
-
-        number_str = match.group(0)
-        self.pos += len(number_str)
-        self.column += len(number_str)
-
-        try:
-            return float(number_str)
-        except ValueError:
-            raise SyntaxError(f"Некорректное число в define: {number_str} (строка {self.line}, столбец {self.column})")
-
-    def _parse_dict(self):
-        """Парсинг словаря { key => value, ... }"""
-        if not self._consume('{'):
-            raise SyntaxError(f"Ожидалось '{{' (строка {self.line}, столбец {self.column})")
+        content = text[1:-1].strip()
+        if not content:
+            return {}
 
         result = {}
+        i = 0
 
-        self._skip_whitespace_and_comments()
+        while i < len(content):
+            # Пропускаем пробелы
+            while i < len(content) and content[i] in ' \t\n\r':
+                i += 1
 
-        while self._peek() != '}':
+            if i >= len(content):
+                break
+
             # Ключ
-            key = self._parse_identifier()
+            key_start = i
+            while i < len(content) and (content[i].isalpha() or content[i] == '_' or content[i].isdigit()):
+                i += 1
+            key = content[key_start:i]
 
-            self._skip_whitespace_and_comments()
+            if not key:
+                # Если пустой ключ, пропускаем
+                i += 1
+                continue
 
-            # Стрелка =>
-            if not self._consume('=>'):
-                raise SyntaxError(f"Ожидалось '=>' после ключа '{key}' (строка {self.line}, столбец {self.column})")
+            # Проверяем ключ
+            if not re.match(r'^[_a-z][_a-z0-9]*$', key):
+                raise SyntaxError(f"Неправильный идентификатор: {key}")
 
-            self._skip_whitespace_and_comments()
+            # Пропускаем пробелы
+            while i < len(content) and content[i] in ' \t\n\r':
+                i += 1
+
+            # Проверяем =>
+            if i + 2 > len(content) or content[i:i + 2] != '=>':
+                raise SyntaxError(f"Ожидалось => после ключа {key}")
+            i += 2
+
+            # Пропускаем пробелы
+            while i < len(content) and content[i] in ' \t\n\r':
+                i += 1
 
             # Значение
-            value = self._parse_value()
+            value_start = i
+
+            # Константа
+            if content[i] == '$':
+                i += 1
+                const_start = i
+                while i < len(content) and content[i] != '$':
+                    i += 1
+                const_name = content[const_start:i]
+
+                if i >= len(content):
+                    raise SyntaxError(f"Незакрытая константа: ${const_name}")
+
+                if const_name not in self.constants:
+                    raise SyntaxError(f"Неопределённая константа: ${const_name}$")
+
+                value = self.constants[const_name]
+                i += 1  # Пропускаем $
+
+            # Строка
+            elif content[i:i + 2] == '@"':
+                i += 2
+                str_start = i
+                while i < len(content) and content[i] != '"':
+                    i += 1
+
+                if i >= len(content):
+                    raise SyntaxError("Незакрытая строка")
+
+                value = content[str_start:i]
+                i += 1  # Пропускаем "
+
+            # Словарь
+            elif content[i] == '{':
+                depth = 1
+                dict_start = i
+                i += 1
+
+                while i < len(content) and depth > 0:
+                    if content[i] == '{':
+                        depth += 1
+                    elif content[i] == '}':
+                        depth -= 1
+                    i += 1
+
+                if depth > 0:
+                    raise SyntaxError("Непарные фигурные скобки")
+
+                dict_text = content[dict_start:i]
+                value = self._parse_dict(dict_text)
+
+            # Число или true/false
+            else:
+                val_start = i
+                while i < len(content) and content[i] not in ',}':
+                    i += 1
+
+                val_str = content[val_start:i].strip()
+
+                # Булевы значения
+                if val_str == 'true':
+                    value = True
+                elif val_str == 'false':
+                    value = False
+                # Число
+                elif re.match(r'^[+-]?\d+\.\d+$', val_str):
+                    value = float(val_str)
+                else:
+                    raise SyntaxError(f"Непонятное значение: {val_str}")
+
+            # Сохраняем пару
             result[key] = value
 
-            self._skip_whitespace_and_comments()
+            # Пропускаем пробелы
+            while i < len(content) and content[i] in ' \t\n\r':
+                i += 1
 
-            # Запятая или конец
-            if self._peek() == ',':
-                self._consume(',')
-                self._skip_whitespace_and_comments()
-
-        if not self._consume('}'):
-            raise SyntaxError(f"Ожидалось '}}' (строка {self.line}, столбец {self.column})")
+            # Запятая
+            if i < len(content) and content[i] == ',':
+                i += 1
 
         return result
 
-    def _parse_identifier(self):
-        """Парсинг идентификатора [_a-z]+"""
-        start_pos = self.pos
 
-        if self.pos < len(self.text) and (self.text[self.pos] == '_' or self.text[self.pos].islower()):
-            self.pos += 1
-            self.column += 1
+# CLI интерфейс
+def main_cli():
+    """CLI для тестирования"""
+    import sys
 
-            while self.pos < len(self.text) and (
-                    self.text[self.pos] == '_' or self.text[self.pos].islower() or self.text[self.pos].isdigit()):
-                self.pos += 1
-                self.column += 1
+    if len(sys.argv) < 2:
+        print("Использование: python parser.py <файл_конфигурации>")
+        print("Пример: python parser.py example_server.conf")
+        sys.exit(1)
 
-            return self.text[start_pos:self.pos]
-        else:
-            raise SyntaxError(
-                f"Ожидался идентификатор (начинается с _ или маленькой буквы) (строка {self.line}, столбец {self.column})")
+    filename = sys.argv[1]
 
-    def _parse_value(self):
-        """Парсинг значения: число, строка, словарь или константа"""
-        if self._peek() == '$':
-            return self._parse_constant_usage()
-        elif self._peek() == '@':
-            return self._parse_string()
-        elif self._peek() in '+-' or self._peek().isdigit():
-            return self._parse_number()
-        elif self._peek() == '{':
-            return self._parse_dict()
-        else:
-            raise SyntaxError(
-                f"Неизвестное значение, начинается с '{self._peek()}' (строка {self.line}, столбец {self.column})")
-
-    def _parse_constant_usage(self):
-        """Парсинг использования константы $имя$"""
-        if not self._consume('$'):
-            raise SyntaxError(f"Ожидалось '$' (строка {self.line}, столбец {self.column})")
-
-        start_pos = self.pos
-
-        # Имя константы
-        while self.pos < len(self.text) and (
-                self.text[self.pos] == '_' or self.text[self.pos].islower() or self.text[self.pos].isdigit()):
-            self.pos += 1
-            self.column += 1
-
-        const_name = self.text[start_pos:self.pos]
-
-        if not self._consume('$'):
-            raise SyntaxError(
-                f"Ожидалось закрывающий '$' для константы '{const_name}' (строка {self.line}, столбец {self.column})")
-
-        if const_name not in self.constants:
-            raise SyntaxError(f"Неопределённая константа '{const_name}' (строка {self.line}, столбец {self.column})")
-
-        return self.constants[const_name]
-
-    def _parse_string(self):
-        """Парсинг строки @"текст" """
-        if not self._consume('@"'):
-            raise SyntaxError(f"Ожидалось '@\"' (строка {self.line}, столбец {self.column})")
-
-        start_pos = self.pos
-
-        while self.pos < len(self.text) and self.text[self.pos] != '"':
-            if self.text[self.pos] == '\n':
-                self.line += 1
-                self.column = 1
-            else:
-                self.column += 1
-            self.pos += 1
-
-        if self.pos >= len(self.text):
-            raise SyntaxError(f"Незакрытая строка (строка {self.line})")
-
-        value = self.text[start_pos:self.pos]
-
-        if not self._consume('"'):
-            raise SyntaxError(f"Ожидалось '\"' в конце строки (строка {self.line}, столбец {self.column})")
-
-        return value
-
-    def _parse_number(self):
-        """Парсинг числа [+-]?\d+\.\d+ """
-        pattern = r'[+-]?\d+\.\d+'
-        match = re.match(pattern, self.text[self.pos:])
-
-        if not match:
-            raise SyntaxError(f"Ожидалось число формата [+-]?\d+\.\d+ (строка {self.line}, столбец {self.column})")
-
-        number_str = match.group(0)
-        self.pos += len(number_str)
-        self.column += len(number_str)
-
-        try:
-            return float(number_str)
-        except ValueError:
-            raise SyntaxError(f"Некорректное число: {number_str} (строка {self.line}, столбец {self.column})")
-
-    def _skip_whitespace_and_comments(self):
-        """Пропуск пробелов и комментариев"""
-        while self.pos < len(self.text):
-            # Пробелы и переводы строк
-            if self.text[self.pos] in ' \t\r':
-                self.pos += 1
-                self.column += 1
-            elif self.text[self.pos] == '\n':
-                self.pos += 1
-                self.line += 1
-                self.column = 1
-
-            # Однострочный комментарий C ...
-            elif self.text[self.pos] == 'C' and (self.pos + 1 < len(self.text)) and self.text[self.pos + 1] in ' \t':
-                self.pos += 2
-                self.column += 2
-                while self.pos < len(self.text) and self.text[self.pos] != '\n':
-                    self.pos += 1
-                    self.column += 1
-
-            # Многострочный комментарий --[[ ... ]]
-            elif self.pos + 4 <= len(self.text) and self.text[self.pos:self.pos + 4] == '--[[':
-                self.pos += 4
-                self.column += 4
-
-                while self.pos + 2 <= len(self.text) and self.text[self.pos:self.pos + 2] != ']]':
-                    if self.text[self.pos] == '\n':
-                        self.line += 1
-                        self.column = 1
-                    else:
-                        self.column += 1
-                    self.pos += 1
-
-                if self.pos + 2 > len(self.text):
-                    raise SyntaxError("Незакрытый многострочный комментарий")
-
-                self.pos += 2
-                self.column += 2
-            else:
-                break
-
-    def _peek(self, length=1):
-        """Посмотреть следующий символ без продвижения"""
-        if self.pos + length <= len(self.text):
-            return self.text[self.pos:self.pos + length]
-        return ''
-
-    def _consume(self, expected):
-        """Съесть ожидаемый символ/строку"""
-        if self.pos + len(expected) <= len(self.text) and self.text[self.pos:self.pos + len(expected)] == expected:
-            for char in expected:
-                if char == '\n':
-                    self.line += 1
-                    self.column = 1
-                else:
-                    self.column += 1
-            self.pos += len(expected)
-            return True
-        return False
-
-
-# Тест
-def test_constants():
-    """Тест констант"""
-    print("=== ТЕСТ КОНСТАНТ ===")
+    try:
+        with open(filename, 'r', encoding='utf-8') as f:
+            config_text = f.read()
+    except FileNotFoundError:
+        print(f"Ошибка: файл '{filename}' не найден")
+        sys.exit(1)
 
     parser = ConfigParser()
 
-    test = """
+    try:
+        result = parser.parse(config_text)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    except SyntaxError as e:
+        print(f"Синтаксическая ошибка: {e}")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Ошибка: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    # Тестовый пример
+    test_config = """
     (define port 8080.0)
     (define host @"localhost")
 
     {
-        server_port => $port$,
-        server_host => $host$,
-        nested => {
-            port => $port$
+        server => {
+            port => $port$,
+            host => $host$
         }
     }
     """
 
+    parser = ConfigParser()
+
     try:
-        result = parser.parse(test)
-        print("✓ Успешно!")
+        result = parser.parse(test_config)
+        print("✅ Тест пройден успешно!")
         print(json.dumps(result, indent=2, ensure_ascii=False))
-    except SyntaxError as e:
-        print(f"✗ Ошибка: {e}")
+    except Exception as e:
+        print(f"❌ Ошибка: {e}")
 
-
-def _collect_constants(self):
-
-    # После сбора констант, пропускаем возможные пробелы/комментарии
-    original_pos = self.pos
-    self._skip_whitespace_and_comments()
-
-    # Если после констант ничего нет - это ок
-    if self.pos >= len(self.text):
-        return
-
-    # Если не начинается с { - ошибка
-    if self.text[self.pos] != '{':
-        # Но может быть только константы
-        # Пропускаем до конца
-        while self.pos < len(self.text):
-            self.pos += 1
-
-if __name__ == "__main__":
-    test_constants()
