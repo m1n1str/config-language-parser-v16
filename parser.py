@@ -1,7 +1,6 @@
-#!/usr/bin/env python3
 """
 Парсер (вариант 16)
-Базовая версия: числа, строки, словари, комментарии
+Полная версия с поддержкой констант
 """
 
 import json
@@ -14,10 +13,20 @@ class ConfigParser:
         self.pos = 0
         self.line = 1
         self.column = 1
+        self.constants = {}  # Хранилище констант
 
     def parse(self, text):
-        """Основной метод парсинга"""
+        """Основной метод парсинга с поддержкой констант"""
         self.text = text
+        self.pos = 0
+        self.line = 1
+        self.column = 1
+        self.constants = {}
+
+        # Шаг 1: Собираем все константы
+        self._collect_constants()
+
+        # Шаг 2: Парсим основную конфигурацию
         self.pos = 0
         self.line = 1
         self.column = 1
@@ -35,6 +44,133 @@ class ConfigParser:
 
         return result
 
+    def _collect_constants(self):
+        """Сбор всех определений констант (define)"""
+        original_pos = self.pos
+        original_line = self.line
+        original_column = self.column
+
+        while self.pos < len(self.text):
+            self._skip_whitespace_and_comments()
+
+            if self._peek() == '(':
+                self.pos += 1
+                self.column += 1
+
+                self._skip_whitespace_and_comments()
+
+                # Проверяем define
+                if self._peek(6) == 'define':
+                    self.pos += 6
+                    self.column += 6
+
+                    self._skip_whitespace_and_comments()
+
+                    # Имя константы
+                    const_name = self._parse_identifier_for_define()
+
+                    self._skip_whitespace_and_comments()
+
+                    # Значение константы
+                    const_value = self._parse_constant_value()
+
+                    # Сохраняем константу
+                    self.constants[const_name] = const_value
+
+                    # Закрывающая скобка
+                    self._skip_whitespace_and_comments()
+                    if self._peek() != ')':
+                        raise SyntaxError(
+                            f"Ожидалось ')' после определения константы (строка {self.line}, столбец {self.column})")
+                    self.pos += 1
+                    self.column += 1
+                else:
+                    # Не define, пропускаем до конца скобки
+                    while self.pos < len(self.text) and self.text[self.pos] != ')':
+                        self.pos += 1
+                        self.column += 1
+                    if self.pos < len(self.text):
+                        self.pos += 1
+                        self.column += 1
+            else:
+                self.pos += 1
+                self.column += 1
+
+        # Возвращаем позицию на начало
+        self.pos = original_pos
+        self.line = original_line
+        self.column = original_column
+
+    def _parse_identifier_for_define(self):
+        """Парсинг идентификатора для define (отдельный метод)"""
+        start_pos = self.pos
+
+        if self.pos < len(self.text) and (self.text[self.pos] == '_' or self.text[self.pos].islower()):
+            self.pos += 1
+            self.column += 1
+
+            while self.pos < len(self.text) and (
+                    self.text[self.pos] == '_' or self.text[self.pos].islower() or self.text[self.pos].isdigit()):
+                self.pos += 1
+                self.column += 1
+
+            return self.text[start_pos:self.pos]
+        else:
+            raise SyntaxError(f"Ожидался идентификатор для define (строка {self.line}, столбец {self.column})")
+
+    def _parse_constant_value(self):
+        """Парсинг значения для define"""
+        if self._peek() == '@':
+            return self._parse_string_in_define()
+        elif self._peek() in '+-' or self._peek().isdigit():
+            return self._parse_number_in_define()
+        else:
+            raise SyntaxError(f"Некорректное значение константы (строка {self.line}, столбец {self.column})")
+
+    def _parse_string_in_define(self):
+        """Парсинг строки внутри define"""
+        if not (self.pos + 2 <= len(self.text) and self.text[self.pos:self.pos + 2] == '@"'):
+            raise SyntaxError(f"Ожидалось '@\"' (строка {self.line}, столбец {self.column})")
+
+        self.pos += 2
+        self.column += 2
+        start_pos = self.pos
+
+        while self.pos < len(self.text) and self.text[self.pos] != '"':
+            if self.text[self.pos] == '\n':
+                self.line += 1
+                self.column = 1
+            else:
+                self.column += 1
+            self.pos += 1
+
+        if self.pos >= len(self.text):
+            raise SyntaxError(f"Незакрытая строка в определении константы (строка {self.line})")
+
+        value = self.text[start_pos:self.pos]
+        self.pos += 1  # Закрывающая кавычка
+        self.column += 1
+
+        return value
+
+    def _parse_number_in_define(self):
+        """Парсинг числа внутри define"""
+        pattern = r'[+-]?\d+\.\d+'
+        match = re.match(pattern, self.text[self.pos:])
+
+        if not match:
+            raise SyntaxError(
+                f"Ожидалось число формата [+-]?\d+\.\d+ в define (строка {self.line}, столбец {self.column})")
+
+        number_str = match.group(0)
+        self.pos += len(number_str)
+        self.column += len(number_str)
+
+        try:
+            return float(number_str)
+        except ValueError:
+            raise SyntaxError(f"Некорректное число в define: {number_str} (строка {self.line}, столбец {self.column})")
+
     def _parse_dict(self):
         """Парсинг словаря { key => value, ... }"""
         if not self._consume('{'):
@@ -45,7 +181,7 @@ class ConfigParser:
         self._skip_whitespace_and_comments()
 
         while self._peek() != '}':
-            # Ключ (идентификатор)
+            # Ключ
             key = self._parse_identifier()
 
             self._skip_whitespace_and_comments()
@@ -76,12 +212,10 @@ class ConfigParser:
         """Парсинг идентификатора [_a-z]+"""
         start_pos = self.pos
 
-        # Первый символ должен быть _ или буква
         if self.pos < len(self.text) and (self.text[self.pos] == '_' or self.text[self.pos].islower()):
             self.pos += 1
             self.column += 1
 
-            # Остальные символы
             while self.pos < len(self.text) and (
                     self.text[self.pos] == '_' or self.text[self.pos].islower() or self.text[self.pos].isdigit()):
                 self.pos += 1
@@ -93,8 +227,10 @@ class ConfigParser:
                 f"Ожидался идентификатор (начинается с _ или маленькой буквы) (строка {self.line}, столбец {self.column})")
 
     def _parse_value(self):
-        """Парсинг значения: число, строка или словарь"""
-        if self._peek() == '@':
+        """Парсинг значения: число, строка, словарь или константа"""
+        if self._peek() == '$':
+            return self._parse_constant_usage()
+        elif self._peek() == '@':
             return self._parse_string()
         elif self._peek() in '+-' or self._peek().isdigit():
             return self._parse_number()
@@ -103,6 +239,30 @@ class ConfigParser:
         else:
             raise SyntaxError(
                 f"Неизвестное значение, начинается с '{self._peek()}' (строка {self.line}, столбец {self.column})")
+
+    def _parse_constant_usage(self):
+        """Парсинг использования константы $имя$"""
+        if not self._consume('$'):
+            raise SyntaxError(f"Ожидалось '$' (строка {self.line}, столбец {self.column})")
+
+        start_pos = self.pos
+
+        # Имя константы
+        while self.pos < len(self.text) and (
+                self.text[self.pos] == '_' or self.text[self.pos].islower() or self.text[self.pos].isdigit()):
+            self.pos += 1
+            self.column += 1
+
+        const_name = self.text[start_pos:self.pos]
+
+        if not self._consume('$'):
+            raise SyntaxError(
+                f"Ожидалось закрывающий '$' для константы '{const_name}' (строка {self.line}, столбец {self.column})")
+
+        if const_name not in self.constants:
+            raise SyntaxError(f"Неопределённая константа '{const_name}' (строка {self.line}, столбец {self.column})")
+
+        return self.constants[const_name]
 
     def _parse_string(self):
         """Парсинг строки @"текст" """
@@ -207,36 +367,33 @@ class ConfigParser:
         return False
 
 
-# Тестовая функция
-def test_basic():
-    """Тест базового функционала"""
-    print("=ТЕСТ БАЗОВОГО ПАРСЕРА=")
+# Тест
+def test_constants():
+    """Тест констант"""
+    print("=== ТЕСТ КОНСТАНТ ===")
 
     parser = ConfigParser()
 
-    # Тест 1: Простой словарь
-    test1 = """{ port => 8080.0, host => @"localhost" }"""
-    print("Тест 1 - Простой словарь:")
-    try:
-        result = parser.parse(test1)
-        print("Успешно:", json.dumps(result, indent=2, ensure_ascii=False))
-    except SyntaxError as e:
-        print(f" Ошибка: {e}")
+    test = """
+    (define port 8080.0)
+    (define host @"localhost")
 
-    # Тест 2: С комментариями
-    test2 = """C Это комментарий
-{
-    C Ещё комментарий
-    port => 8080.0,
-    host => @"server"
-}"""
-    print("\nТест 2 - С комментариями:")
+    {
+        server_port => $port$,
+        server_host => $host$,
+        nested => {
+            port => $port$
+        }
+    }
+    """
+
     try:
-        result = parser.parse(test2)
-        print("Успешно:", json.dumps(result, indent=2, ensure_ascii=False))
+        result = parser.parse(test)
+        print("✓ Успешно!")
+        print(json.dumps(result, indent=2, ensure_ascii=False))
     except SyntaxError as e:
-        print(f"Ошибка: {e}")
+        print(f"✗ Ошибка: {e}")
 
 
 if __name__ == "__main__":
-    test_basic()
+    test_constants()
