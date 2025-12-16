@@ -395,5 +395,22 @@ def test_constants():
         print(f"✗ Ошибка: {e}")
 
 
+def _collect_constants(self):
+
+    # После сбора констант, пропускаем возможные пробелы/комментарии
+    original_pos = self.pos
+    self._skip_whitespace_and_comments()
+
+    # Если после констант ничего нет - это ок
+    if self.pos >= len(self.text):
+        return
+
+    # Если не начинается с { - ошибка
+    if self.text[self.pos] != '{':
+        # Но может быть только константы
+        # Пропускаем до конца
+        while self.pos < len(self.text):
+            self.pos += 1
+
 if __name__ == "__main__":
     test_constants()
